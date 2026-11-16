@@ -51,6 +51,14 @@ RUN apt-get update \
         libpq-dev \
  && rm -rf /var/lib/apt/lists/*
 
+# Extra root CAs (e.g. a corporate TLS-inspection proxy). Drop PEM *.crt files
+# in certs/; the directory is empty by default, so this is a no-op. uv and
+# Python ship their own CA lists, so point them at the system bundle.
+COPY certs/ /usr/local/share/ca-certificates/extra/
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    UV_NATIVE_TLS=1
+
 # Install uv without introducing a non-NVIDIA build stage.
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
         -o /tmp/install-uv.sh \
@@ -88,6 +96,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1000 auto_ontology \
  && useradd  --system --uid 1000 --gid auto_ontology --home /app --shell /usr/sbin/nologin auto_ontology
+
+# Same extra CAs as the builder, for outbound calls at runtime (Snowflake,
+# model endpoints). requests and httpx default to certifi, not the system store.
+COPY certs/ /usr/local/share/ca-certificates/extra/
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /app
 

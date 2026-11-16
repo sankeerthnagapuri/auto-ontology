@@ -28,15 +28,21 @@ ARG BASE_IMG_TAG=jammy-20250619
 FROM $BASE_IMG:$BASE_IMG_TAG AS base-node
 
 ARG NODE_MAJOR
+# Extra root CAs (e.g. a corporate TLS-inspection proxy). Drop PEM *.crt files
+# in frontend/certs/; the directory is empty by default, so this is a no-op.
+COPY certs/ /usr/local/share/ca-certificates/extra/
 # The pinned base image predates later Ubuntu security fixes (libssl3, ...),
 # so apply them first; every later stage builds on this one.
 RUN apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ && update-ca-certificates \
  && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && apt-get purge -y --auto-remove curl gnupg \
  && rm -rf /var/lib/apt/lists/*
+# Node ships its own CA list; trust the system bundle (with any extra CAs) too.
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 ############################
 # Stage 1: deps

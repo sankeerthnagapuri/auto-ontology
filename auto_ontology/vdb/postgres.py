@@ -171,7 +171,12 @@ class PostgresVDB:
 
         self._engine: Optional[PGEngine] = None
         self._store: Optional[PGVectorStore] = None
-        self.vector_size: Optional[int] = kwargs.get("vector_size", 2048)
+        # EMBED_DIMENSIONS must match the embedding model (2048 for the default
+        # NVIDIA model, 1024 or 768 for Snowflake Cortex models). Changing it
+        # needs a fresh vector table: an existing column keeps its old size.
+        self.vector_size: Optional[int] = kwargs.get(
+            "vector_size", int(os.environ.get("EMBED_DIMENSIONS") or 2048)
+        )
         # Resetting the database embeddings prior to ingestion
         # In order to support without recreate:
         # 1. The ingestion should return which tables/columns were added/updated/deleted

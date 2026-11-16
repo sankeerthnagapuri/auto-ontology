@@ -94,3 +94,7 @@ helm.sh
 /temp.txt
 /vectors_wiki.py
 /vectors_wiki_load.py
+
+# Extra root CAs for Docker builds (machine/org-specific, never commit)
+certs/*.crt
+frontend/certs/*.crt

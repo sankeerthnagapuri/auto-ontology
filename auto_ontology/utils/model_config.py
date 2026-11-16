@@ -54,6 +54,12 @@ _DEFAULTS_BY_KEY_PREFIX: dict[str, dict[str, str]] = {
     },
 }
 
+# Model-name prefix that routes a triplet to Snowflake Cortex. Chat models use
+# the OpenAI-compatible ``/api/v2/cortex/v1`` endpoint and embedding models use
+# ``/api/v2/cortex/inference:embed``; both take a programmatic access token as
+# the API key. The prefix is stripped before the model name is sent.
+CORTEX_MODEL_PREFIX = "cortex/"
+
 # Default set to use when the API key matches no known prefix (or is unset).
 _FALLBACK_KEY_PREFIX = "sk-"
 

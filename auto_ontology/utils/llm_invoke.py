@@ -18,7 +18,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from auto_ontology.utils.model_config import resolve
+from auto_ontology.utils.model_config import CORTEX_MODEL_PREFIX, resolve
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +224,26 @@ def _build_client(
     OpenAI-family models (``openai/``, ``azure/``, ``aws/`` prefixes) go through
     ``ChatOpenAI``, which supports structured output. Everything else uses
     ``ChatNVIDIA``.
+
+    ``cortex/`` selects Snowflake Cortex's OpenAI-compatible endpoint
+    (``https://<account>.snowflakecomputing.com/api/v2/cortex/v1``, with a
+    programmatic access token as the key). Cortex names its models without a
+    provider prefix (``claude-sonnet-4-5``), so the prefix is stripped before
+    the request is sent.
     """
+    if model.startswith(CORTEX_MODEL_PREFIX):
+        model = model.removeprefix(CORTEX_MODEL_PREFIX)
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            max_tokens=max_tokens,
+            timeout=LLM_INVOKE_TIMEOUT_S,
+            max_retries=0,
+        )
+
     if model.startswith(("openai/", "azure/", "aws/")):
         from langchain_openai import ChatOpenAI
 
@@ -471,10 +490,23 @@ def _structured_output_kwargs(llm: BaseChatModel) -> dict:
     "required", and langchain's default of naming the tool) hits that conflict, and only
     omitting it succeeds. The model still calls the tool without being forced to, and
     the caller retries if it ever answers without one.
+
+    Snowflake Cortex is the exception: it accepts a forced tool choice, and
+    without one Claude often answers conversational prompts in prose, so the
+    parse returns ``None`` on every retry. Cortex keeps langchain's default,
+    which forces the schema's tool.
     """
     if _is_claude(llm):
+        if _is_cortex(llm):
+            return {"method": "function_calling"}
         return {"method": "function_calling", "tool_choice": None}
     return {}
+
+
+def _is_cortex(llm: BaseChatModel) -> bool:
+    """True when *llm* is served by Snowflake Cortex, matched by its base URL."""
+    base_url = str(getattr(llm, "openai_api_base", "") or "")
+    return "snowflakecomputing.com" in base_url and "/cortex/" in base_url
 
 
 def _invoke_text_once(llm: BaseChatModel, prompt: str) -> str:

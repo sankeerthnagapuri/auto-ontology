@@ -16,6 +16,10 @@ the URL, and each built-in default uses a different one:
   ``rankings[].logit``.
 
 Any other URL is treated as a NIM base and gets ``/v1/ranking`` appended.
+
+Setting ``RERANK_ENDPOINT=disabled`` turns reranking off (Snowflake Cortex
+has no rerank API). :func:`rerank_hits` then raises, and the caller uses its
+existing fallback.
 """
 
 from __future__ import annotations
@@ -111,6 +115,8 @@ def rerank_hits(
     """
     if not hits:
         return hits
+    if rerank_invoke_url.strip().lower() == "disabled":
+        raise RuntimeError("Reranking is disabled (RERANK_ENDPOINT=disabled).")
     scores = _scores(
         query,
         [str(hit.get(text_key) or "") for hit in hits],

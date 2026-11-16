@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal
 import httpx
 from openai import APIStatusError, Omit, OpenAI
 
-from auto_ontology.utils.model_config import resolve
+from auto_ontology.utils.model_config import CORTEX_MODEL_PREFIX, resolve
 from auto_ontology.vdb.records import write_embedded_rows
 
 if TYPE_CHECKING:
@@ -51,6 +51,13 @@ InputType = Literal["passage", "query"]
 # the inference-api nvfp4 deployment drops it: the hosted
 # ``nvidia/nemotron-3.5-embed-1b`` on build.nvidia.com honours ``input_type``.
 _TEXT_PREFIXED_MODELS = ("nemotron-3.5-embed-1b-nvfp4",)
+
+# Cortex's embed API caps each string at 4096 characters and rejects longer
+# ones, rather than truncating like the NIM ``truncate: END`` option.
+_CORTEX_MAX_CHARS = 4096
+# Cortex allows 200 embed requests per minute; 32 in flight exhausts that in
+# seconds, so Cortex gets a smaller pool and the chunk retry absorbs the rest.
+_CORTEX_MAX_CONCURRENT = 4
 
 # Each field falls back to DEFAULT_MODELS_<field>.
 _EMBED_ENDPOINT = resolve("EMBED", "ENDPOINT")
@@ -99,6 +106,13 @@ class EmbedParams:
 
 
 def get_embed_params() -> EmbedParams:
+    if _EMBED_MODEL.startswith(CORTEX_MODEL_PREFIX):
+        return EmbedParams(
+            embed_invoke_url=_EMBED_ENDPOINT,
+            model_name=_EMBED_MODEL,
+            api_key=_EMBED_API_KEY,
+            nim_http_max_concurrent=_CORTEX_MAX_CONCURRENT,
+        )
     return EmbedParams(
         embed_invoke_url=_EMBED_ENDPOINT,
         model_name=_EMBED_MODEL,
@@ -152,7 +166,66 @@ def _client(params: EmbedParams) -> OpenAI:
 def _text_prefix(model_name: str, input_type: InputType) -> str:
     if any(model in model_name for model in _TEXT_PREFIXED_MODELS):
         return f"{input_type}: "
+    # Arctic embed models are trained with a ``query: `` prefix on searches and
+    # none on documents; Cortex's API has no ``input_type`` to carry it.
+    if model_name.startswith(CORTEX_MODEL_PREFIX) and "arctic" in model_name:
+        return "query: " if input_type == "query" else ""
     return ""
+
+
+def _cortex_embed_url(endpoint: str) -> str:
+    """*endpoint* as the full Cortex embed URL; an account base URL is accepted."""
+    url = endpoint.rstrip("/")
+    if url.endswith("inference:embed"):
+        return url
+    return f"{url}/api/v2/cortex/inference:embed"
+
+
+def _cortex_embed_batch(
+    texts: list[str],
+    params: EmbedParams,
+    *,
+    timeout: float,
+    retries: int,
+) -> list[list[float]]:
+    """Embed *texts* with Snowflake Cortex, one vector per text in order.
+
+    Cortex returns each embedding wrapped in an extra list (``[[...]]``), which
+    is unwrapped here. 429 and 5xx responses are retried with backoff; any
+    other error is raised as :class:`httpx.HTTPStatusError`.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {params.api_key}",
+    }
+    payload = {
+        "model": params.model_name.removeprefix(CORTEX_MODEL_PREFIX),
+        "text": [text[:_CORTEX_MAX_CHARS] for text in texts],
+    }
+    url = _cortex_embed_url(params.embed_invoke_url)
+    for attempt in range(retries + 1):
+        response = httpx.post(url, json=payload, headers=headers, timeout=timeout)
+        retryable = response.status_code == 429 or response.status_code >= 500
+        if not retryable or attempt == retries:
+            break
+        time.sleep(min(2.0**attempt, 30.0))
+    response.raise_for_status()
+
+    items = response.json().get("data") or []
+    vectors: list[list[float] | None] = [None] * len(texts)
+    for item in items:
+        index = int(item["index"])
+        embedding = item["embedding"]
+        if embedding and isinstance(embedding[0], list):
+            embedding = embedding[0]
+        if 0 <= index < len(vectors):
+            vectors[index] = [float(v) for v in embedding]
+    if any(v is None for v in vectors) or len(items) != len(texts):
+        raise RuntimeError(
+            f"Cortex embed returned {len(items)} vector(s) for {len(texts)} input(s)."
+        )
+    return vectors  # type: ignore[return-value]
 
 
 def embed_texts(
@@ -178,11 +251,32 @@ def embed_texts(
     if not to_send:
         return vectors
 
+    batches = list(itertools.batched(to_send, max(1, params.inference_batch_size)))
+    prefix = _text_prefix(params.model_name, input_type)
+
+    if params.model_name.startswith(CORTEX_MODEL_PREFIX):
+
+        def _embed_cortex(indices: tuple[int, ...]) -> None:
+            batch_vectors = _cortex_embed_batch(
+                [prefix + stripped[i] for i in indices],
+                params,
+                timeout=timeout or params.request_timeout_s,
+                retries=_REQUEST_RETRIES if retries is None else retries,
+            )
+            for i, vector in zip(indices, batch_vectors):
+                vectors[i] = vector
+
+        if len(batches) == 1:
+            _embed_cortex(batches[0])
+        else:
+            workers = min(len(batches), max(1, params.nim_http_max_concurrent))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(_embed_cortex, batches))
+        return vectors
+
     client = _client(params)
     if retries is not None:
         client = client.with_options(max_retries=retries)
-    batches = list(itertools.batched(to_send, max(1, params.inference_batch_size)))
-    prefix = _text_prefix(params.model_name, input_type)
 
     def _embed_batch(indices: tuple[int, ...]) -> None:
         response = client.embeddings.create(
@@ -230,9 +324,13 @@ def _is_fatal(exc: Exception) -> bool:
     Any 4xx except 408 (timeout), 409 and 429 (rate limit): a bad key, an
     unknown model id, a wrong path. The client has already retried the rest.
     """
-    return isinstance(exc, APIStatusError) and (
-        400 <= exc.status_code < 500 and exc.status_code not in (408, 409, 429)
-    )
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+    elif isinstance(exc, APIStatusError):
+        status = exc.status_code
+    else:
+        return False
+    return 400 <= status < 500 and status not in (408, 409, 429)
 
 
 def _embed_frame(frame: "pd.DataFrame", params: EmbedParams) -> "pd.DataFrame":
