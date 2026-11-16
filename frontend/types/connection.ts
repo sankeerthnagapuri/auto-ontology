@@ -58,6 +58,8 @@ export type SnowflakeConnectionParams = {
 	private_key?: string;
 	/** Only required when `private_key` is encrypted. */
 	private_key_passphrase?: string;
+	/** Sign in with the OAuth token file mounted at SNOWFLAKE_OAUTH_TOKEN_FILE. */
+	oauth_token_file?: boolean;
 	database: string;
 	/** Optional ingestion allowlist: only these schemas are ingested. Empty/absent = all. */
 	schemas?: string[];

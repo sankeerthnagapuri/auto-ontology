@@ -120,3 +120,85 @@ def test_rerank_disabled_raises() -> None:
         rerank.rerank_hits(
             "q", [{"text": "x"}], rerank_invoke_url="disabled", model_name=""
         )
+
+
+def _token_file(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, token: str) -> Any:
+    path = tmp_path / "token"
+    path.write_text(token)
+    monkeypatch.setenv("SNOWFLAKE_OAUTH_TOKEN_FILE", str(path))
+    return path
+
+
+def test_cortex_embed_uses_the_oauth_token_file(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _token_file(tmp_path, monkeypatch, "oauth-1\n")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(embedding.httpx, "post", _fake_post(calls))
+    params = EmbedParams(
+        model_name="cortex/e5-base-v2", embed_invoke_url=_ACCOUNT, api_key="oauth"
+    )
+
+    embed_texts(["a"], params, "passage")
+    path.write_text("oauth-2")
+    embed_texts(["b"], params, "passage")
+
+    assert calls[0]["headers"]["Authorization"] == "Bearer oauth-1"
+    assert calls[0]["headers"]["X-Snowflake-Authorization-Token-Type"] == "OAUTH"
+    # A refreshed file is picked up on the next request, with no client rebuild.
+    assert calls[1]["headers"]["Authorization"] == "Bearer oauth-2"
+
+
+def test_cortex_embed_without_token_file_keeps_the_static_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SNOWFLAKE_OAUTH_TOKEN_FILE", raising=False)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(embedding.httpx, "post", _fake_post(calls))
+    params = EmbedParams(
+        model_name="cortex/e5-base-v2", embed_invoke_url=_ACCOUNT, api_key="pat"
+    )
+
+    embed_texts(["a"], params, "passage")
+
+    assert calls[0]["headers"]["Authorization"] == "Bearer pat"
+    assert "X-Snowflake-Authorization-Token-Type" not in calls[0]["headers"]
+
+
+def test_cortex_chat_auth_reads_the_token_file_per_request(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _token_file(tmp_path, monkeypatch, "oauth-1")
+    client = llm_invoke._build_client(
+        model="cortex/claude-haiku-4-5",
+        api_key="oauth",
+        base_url=f"{_ACCOUNT}/api/v2/cortex/v1",
+        temperature=0.0,
+        max_tokens=100,
+    )
+    auth = client.http_client.auth
+    assert isinstance(auth, llm_invoke._CortexAuth)
+
+    def sent(request: httpx.Request) -> httpx.Request:
+        return next(auth.auth_flow(request))
+
+    first = sent(httpx.Request("POST", f"{_ACCOUNT}/api/v2/cortex/v1/chat/completions"))
+    path.write_text("oauth-2")
+    second = sent(
+        httpx.Request("POST", f"{_ACCOUNT}/api/v2/cortex/v1/chat/completions")
+    )
+
+    assert first.headers["Authorization"] == "Bearer oauth-1"
+    assert first.headers["X-Snowflake-Authorization-Token-Type"] == "OAUTH"
+    assert second.headers["Authorization"] == "Bearer oauth-2"
+
+
+def test_empty_token_file_is_an_error(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from auto_ontology.utils.model_config import cortex_bearer
+
+    _token_file(tmp_path, monkeypatch, "  \n")
+
+    with pytest.raises(RuntimeError, match="empty"):
+        cortex_bearer("pat")

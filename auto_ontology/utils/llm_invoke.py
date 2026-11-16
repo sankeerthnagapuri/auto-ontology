@@ -14,11 +14,16 @@ import weakref
 from typing import Iterator, Type, TypeVar
 
 import requests as _requests
+import httpx
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from auto_ontology.utils.model_config import CORTEX_MODEL_PREFIX, resolve
+from auto_ontology.utils.model_config import (
+    CORTEX_MODEL_PREFIX,
+    cortex_bearer,
+    resolve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +216,25 @@ _NON_REASONING_MODEL_NAME = resolve("NON_REASONING", "MODEL")
 _NON_REASONING_API_KEY = resolve("NON_REASONING", "API_KEY")
 
 
+class _CortexAuth(httpx.Auth):
+    """httpx auth hook that sets the Cortex bearer on every request.
+
+    With ``SNOWFLAKE_OAUTH_TOKEN_FILE`` set the bearer is the current OAuth token
+    from that file, flagged with the header Snowflake uses to tell token types
+    apart; otherwise it is the static key (a programmatic access token).
+    """
+
+    def __init__(self, static_key: str) -> None:
+        self._static_key = static_key
+
+    def auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+        token, is_oauth = cortex_bearer(self._static_key)
+        request.headers["Authorization"] = f"Bearer {token}"
+        if is_oauth:
+            request.headers["X-Snowflake-Authorization-Token-Type"] = "OAUTH"
+        yield request
+
+
 def _build_client(
     *,
     model: str,
@@ -237,11 +261,15 @@ def _build_client(
 
         return ChatOpenAI(
             model=model,
-            api_key=api_key,
+            api_key=api_key or "unused",
             base_url=base_url,
             max_tokens=max_tokens,
             timeout=LLM_INVOKE_TIMEOUT_S,
             max_retries=0,
+            # The bearer is set per request, so a refreshed OAuth token file is
+            # picked up without rebuilding long-lived clients.
+            http_client=httpx.Client(auth=_CortexAuth(api_key)),
+            http_async_client=httpx.AsyncClient(auth=_CortexAuth(api_key)),
         )
 
     if model.startswith(("openai/", "azure/", "aws/")):

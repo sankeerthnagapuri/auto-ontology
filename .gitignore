@@ -98,3 +98,6 @@ helm.sh
 # Extra root CAs for Docker builds (machine/org-specific, never commit)
 certs/*.crt
 frontend/certs/*.crt
+
+# Local compose override (machine-specific mounts, e.g. the Snowflake OAuth token dir)
+docker-compose.override.yml

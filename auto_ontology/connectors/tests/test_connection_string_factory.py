@@ -112,3 +112,66 @@ def test_round_trip_reaches_the_driver_kwargs() -> None:
     # key itself -- proving the value arrived intact rather than being mangled.
     with pytest.raises(ValueError, match="could not be parsed"):
         _parse_connection_string(build_connection_string(connection))
+
+
+@pytest.mark.parametrize("flag", [True, "true"])
+def test_oauth_token_file_needs_no_credential(flag: object) -> None:
+    result = build_connection_string(_snowflake(oauth_token_file=flag))
+
+    parsed = urlparse(result)
+    assert parsed.password is None
+    assert parse_qs(parsed.query)["authenticator"] == ["oauth"]
+
+
+def test_oauth_token_file_overrides_stored_credentials() -> None:
+    """Credentials merged back from storage must not override a switch to OAuth."""
+    result = build_connection_string(
+        _snowflake(oauth_token_file=True, private_key=PEM, password="old")
+    )
+
+    query = parse_qs(urlparse(result).query)
+    assert urlparse(result).password is None
+    assert "private_key" not in query
+    assert query["authenticator"] == ["oauth"]
+
+
+def test_oauth_round_trip_reads_the_token_file_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SNOWFLAKE_OAUTH_TOKEN_FILE", "/run/snowflake-oauth/token")
+
+    kwargs, _, _ = _parse_connection_string(
+        build_connection_string(_snowflake(oauth_token_file=True))
+    )
+
+    assert kwargs["authenticator"] == "oauth"
+    assert kwargs["token_file_path"] == "/run/snowflake-oauth/token"
+    assert "password" not in kwargs
+    assert "private_key" not in kwargs
+
+
+def test_oauth_without_token_file_env_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SNOWFLAKE_OAUTH_TOKEN_FILE", raising=False)
+
+    with pytest.raises(ValueError, match="SNOWFLAKE_OAUTH_TOKEN_FILE"):
+        _parse_connection_string(
+            build_connection_string(_snowflake(oauth_token_file=True))
+        )
+
+
+def test_oauth_ignores_a_role_in_the_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The token's scope fixes the role; sending another one would fail login."""
+    monkeypatch.setenv("SNOWFLAKE_OAUTH_TOKEN_FILE", "/tmp/token")
+
+    kwargs, _, _ = _parse_connection_string(
+        "snowflake://u@acct?warehouse=WH&database=DB&authenticator=oauth&role=OTHER"
+    )
+
+    assert "role" not in kwargs
+
+
+def test_unchecked_oauth_still_requires_a_credential() -> None:
+    with pytest.raises(ValueError, match="password"):
+        build_connection_string(_snowflake(oauth_token_file=False))

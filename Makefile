@@ -64,6 +64,13 @@ help:
 	@echo "  make migrate-check       Fail if the schema has drifted from the metadata"
 	@echo "  make migrate-revision m=\"...\"  Autogenerate a revision from auto_ontology/dal/schema.py"
 	@echo
+	@echo "Snowflake OAuth token (local Docker; settings from .env):"
+	@echo "  make sf-login            Browser sign-in once (Okta/Duo); refresh token -> Keychain"
+	@echo "  make sf-token            Keep the access token refreshed (leave running)"
+	@echo "  make sf-status           Show token expiry (no secrets)"
+	@echo "  make up                  Refresh once, then docker compose up -d"
+	@echo "  make mcp                 Run the MCP server (AUTO_ONTOLOGY_API_URL=$(AUTO_ONTOLOGY_API_URL))"
+	@echo
 	@echo "Required for publish*: REGISTRY=nvcr.io/<org>/<team>"
 	@echo "Current REGISTRY=$(REGISTRY) TAG=$(TAG)"
 
@@ -127,5 +134,52 @@ migrate-revision:
 	uv run alembic revision --autogenerate -m "$(m)"
 
 .PHONY: migrate migrate-check migrate-revision
+
+# --- Snowflake OAuth token (local Docker, no PAT / key pair) ----------------
+# dev_tools/snowflake_oauth_token.py runs on the host: it signs in once in a
+# browser, keeps the refresh token in the macOS Keychain and writes a fresh
+# access token for the containers (see docker-compose.override.yml).
+# Settings come from the command line or from these keys in .env:
+#   SNOWFLAKE_ACCOUNT=xy12345.us-east-1  SNOWFLAKE_USER=ME  SNOWFLAKE_ROLE=MY_ROLE
+# Only these keys are read from .env, so other values there are never parsed by make.
+
+_env = $(shell grep -E '^$(1)=' .env 2>/dev/null | tail -1 | cut -d= -f2-)
+SNOWFLAKE_ACCOUNT ?= $(call _env,SNOWFLAKE_ACCOUNT)
+SNOWFLAKE_USER    ?= $(call _env,SNOWFLAKE_USER)
+SNOWFLAKE_ROLE    ?= $(call _env,SNOWFLAKE_ROLE)
+SF_TOKEN := uv run dev_tools/snowflake_oauth_token.py
+
+sf-login: require-snowflake
+	@test -n "$(SNOWFLAKE_ROLE)" || (echo 'SNOWFLAKE_ROLE is required for sf-login' >&2; exit 2)
+	$(SF_TOKEN) login --account "$(SNOWFLAKE_ACCOUNT)" --user "$(SNOWFLAKE_USER)" --role "$(SNOWFLAKE_ROLE)"
+
+# Foreground refresh loop; keep this terminal open while the stack runs.
+sf-token: require-snowflake
+	$(SF_TOKEN) run --account "$(SNOWFLAKE_ACCOUNT)" --user "$(SNOWFLAKE_USER)"
+
+sf-refresh: require-snowflake
+	$(SF_TOKEN) refresh --account "$(SNOWFLAKE_ACCOUNT)" --user "$(SNOWFLAKE_USER)"
+
+sf-status:
+	@$(SF_TOKEN) status
+
+# Refresh once (so the file is fresh), then start the stack.
+up: sf-refresh
+	docker compose up -d
+
+# Read-only MCP server for agents, run from the local checkout. Point it at the
+# web app (Compose UI on :3000), not FastAPI on :3001.
+AUTO_ONTOLOGY_API_URL ?= http://localhost:3000
+
+mcp:
+	cd mcp && AUTO_ONTOLOGY_API_URL=$(AUTO_ONTOLOGY_API_URL) uvx --from . auto-ontology-mcp
+
+require-snowflake:
+	@if [ -z "$(SNOWFLAKE_ACCOUNT)" ] || [ -z "$(SNOWFLAKE_USER)" ]; then \
+	  echo "Set SNOWFLAKE_ACCOUNT and SNOWFLAKE_USER in .env or on the command line." >&2; \
+	  exit 2; \
+	fi
+
+.PHONY: sf-login sf-token sf-refresh sf-status up mcp require-snowflake
 
 

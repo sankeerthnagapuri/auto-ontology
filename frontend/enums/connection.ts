@@ -47,6 +47,7 @@ export type ConnectionFieldKey =
 	| 'schema'
 	| 'http_scheme'
 	| 'sso_federation'
+	| 'oauth_token_file'
 	| 'table_allow_regex'
 	| 'table_deny_regex';
 
@@ -81,7 +82,7 @@ export type ConnectionField = {
  * form has to accept either.
  */
 export const CONNECTION_EITHER_FIELDS: Partial<Record<ConnectionType, ConnectionFieldKey[]>> = {
-	[ConnectionType.SNOWFLAKE]: ['password', 'private_key'],
+	[ConnectionType.SNOWFLAKE]: ['password', 'private_key', 'oauth_token_file'],
 };
 
 /** Form fields rendered per connector type. `database` is the connection identity. */
@@ -155,6 +156,13 @@ export const CONNECTION_FIELDS: Record<ConnectionType, ConnectionField[]> = {
 			secret: true,
 			optional: true,
 			hint: 'Only needed if the private key above is encrypted.',
+		},
+		{
+			key: 'oauth_token_file',
+			label: 'Use Snowflake OAuth (Token File)',
+			hint: 'For accounts that allow neither passwords nor key pairs. Signs in with the OAuth token that dev_tools/snowflake_oauth_token.py keeps refreshed on the host and mounts into the containers (SNOWFLAKE_OAUTH_TOKEN_FILE). The token sets the role. Takes precedence over the credentials above.',
+			optional: true,
+			boolean: true,
 		},
 		{ key: 'database', label: 'Database', placeholder: 'MY_DATABASE' },
 	],

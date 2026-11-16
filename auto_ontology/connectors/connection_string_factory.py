@@ -79,6 +79,18 @@ def build_connection_string(connection: Mapping[str, Any]) -> str:
         database = _require(connection, "database")
         params = f"warehouse={_enc(warehouse)}&database={_enc(database)}"
 
+        # OAuth access token read from SNOWFLAKE_OAUTH_TOKEN_FILE, kept fresh by
+        # dev_tools/snowflake_oauth_token.py for accounts that allow neither
+        # passwords nor key pairs. Checked first: a credential left over from an
+        # earlier auth method is merged back in from storage on edit and must
+        # not override an explicit switch to OAuth.
+        if str(connection.get("oauth_token_file") or "").strip().lower() in (
+            "true",
+            "1",
+        ):
+            params += "&authenticator=oauth"
+            return f"snowflake://{_enc(user)}@{account}?{params}"
+
         # Snowflake accounts that enforce MFA reject passwords for PERSON users and
         # forbid them on SERVICE users, so a key pair is the only credential an
         # unattended service can use. Password auth stays supported for accounts

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import os
 import time
 from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -18,6 +19,7 @@ import snowflake.connector
 from cryptography.hazmat.primitives import serialization
 
 from auto_ontology.connectors.base import SQLDatabase, StatementTimeout
+from auto_ontology.utils.model_config import SNOWFLAKE_OAUTH_TOKEN_FILE_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,11 @@ def _parse_connection_string(
 
         snowflake://USER:PASSWORD@ACCOUNT?warehouse=WH&database=SF_DB
         snowflake://USER@ACCOUNT?warehouse=WH&database=SF_DB&private_key=BASE64_PEM
+        snowflake://USER@ACCOUNT?warehouse=WH&database=SF_DB&authenticator=oauth
+
+    ``authenticator=oauth`` reads an OAuth access token from the file named by
+    ``SNOWFLAKE_OAUTH_TOKEN_FILE``. The path comes only from the environment, never
+    the URL, so a stored connection cannot be pointed at an arbitrary file.
 
     Key-pair auth is not merely an alternative: Snowflake accounts that enforce
     MFA reject password sign-in for ``PERSON`` users and forbid passwords on
@@ -112,9 +119,11 @@ def _parse_connection_string(
 
     query = parse_qs(parsed.query)
 
+    oauth = (query.get("authenticator", [""])[0] or "").lower() == "oauth"
+
     password = unquote(parsed.password) if parsed.password is not None else ""
     private_key = query.get("private_key", [None])[0]
-    if not password and not private_key:
+    if not password and not private_key and not oauth:
         raise ValueError(
             "Snowflake connection string requires either a password or a private_key, "
             "e.g. snowflake://user:pass@account?warehouse=COMPUTE_WH&database=MY_DB "
@@ -145,9 +154,20 @@ def _parse_connection_string(
         "login_timeout": 10,
     }
 
+    # OAuth first: the token's scope fixes the role, and the driver re-reads the
+    # file on every connect, so each query picks up the latest refreshed token.
+    if oauth:
+        token_file = os.environ.get(SNOWFLAKE_OAUTH_TOKEN_FILE_ENV, "").strip()
+        if not token_file:
+            raise ValueError(
+                f"Snowflake OAuth connections need {SNOWFLAKE_OAUTH_TOKEN_FILE_ENV} "
+                "set to the token file written by dev_tools/snowflake_oauth_token.py"
+            )
+        connect_kwargs["authenticator"] = "oauth"
+        connect_kwargs["token_file_path"] = token_file
     # A key pair takes precedence: if one is supplied it is the credential the
     # account will actually accept, so a stale password alongside it is ignored.
-    if private_key:
+    elif private_key:
         connect_kwargs["private_key"] = _load_private_key(
             private_key, query.get("private_key_passphrase", [None])[0]
         )
@@ -155,7 +175,7 @@ def _parse_connection_string(
         connect_kwargs["password"] = password
 
     role = query.get("role", [None])[0]
-    if role:
+    if role and not oauth:
         connect_kwargs["role"] = role
 
     schema = query.get("schema", [None])[0]

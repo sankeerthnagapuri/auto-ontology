@@ -60,6 +60,28 @@ _DEFAULTS_BY_KEY_PREFIX: dict[str, dict[str, str]] = {
 # the API key. The prefix is stripped before the model name is sent.
 CORTEX_MODEL_PREFIX = "cortex/"
 
+# File holding a Snowflake OAuth access token, written and refreshed on the host
+# by dev_tools/snowflake_oauth_token.py. When set it replaces the static key for
+# Cortex model calls and backs Snowflake connections with authenticator=oauth.
+SNOWFLAKE_OAUTH_TOKEN_FILE_ENV = "SNOWFLAKE_OAUTH_TOKEN_FILE"
+
+
+def cortex_bearer(static_key: str) -> tuple[str, bool]:
+    """The bearer for a Cortex request and whether it is an OAuth token.
+
+    Read on every call rather than once at startup: the token file is replaced
+    every few minutes, and a long-lived client must never hold a stale token.
+    """
+    path = os.environ.get(SNOWFLAKE_OAUTH_TOKEN_FILE_ENV, "").strip()
+    if not path:
+        return static_key, False
+    with open(path, encoding="utf-8") as handle:
+        token = handle.read().strip()
+    if not token:
+        raise RuntimeError(f"{SNOWFLAKE_OAUTH_TOKEN_FILE_ENV} ({path}) is empty")
+    return token, True
+
+
 # Default set to use when the API key matches no known prefix (or is unset).
 _FALLBACK_KEY_PREFIX = "sk-"
 

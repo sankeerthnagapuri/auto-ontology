@@ -32,7 +32,11 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal
 import httpx
 from openai import APIStatusError, Omit, OpenAI
 
-from auto_ontology.utils.model_config import CORTEX_MODEL_PREFIX, resolve
+from auto_ontology.utils.model_config import (
+    CORTEX_MODEL_PREFIX,
+    cortex_bearer,
+    resolve,
+)
 from auto_ontology.vdb.records import write_embedded_rows
 
 if TYPE_CHECKING:
@@ -194,17 +198,22 @@ def _cortex_embed_batch(
     is unwrapped here. 429 and 5xx responses are retried with backoff; any
     other error is raised as :class:`httpx.HTTPStatusError`.
     """
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {params.api_key}",
-    }
     payload = {
         "model": params.model_name.removeprefix(CORTEX_MODEL_PREFIX),
         "text": [text[:_CORTEX_MAX_CHARS] for text in texts],
     }
     url = _cortex_embed_url(params.embed_invoke_url)
     for attempt in range(retries + 1):
+        # Per attempt: with an OAuth token file, a retry after a backoff must
+        # carry the token refreshed in the meantime, not the one it started with.
+        token, is_oauth = cortex_bearer(params.api_key)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+        if is_oauth:
+            headers["X-Snowflake-Authorization-Token-Type"] = "OAUTH"
         response = httpx.post(url, json=payload, headers=headers, timeout=timeout)
         retryable = response.status_code == 429 or response.status_code >= 500
         if not retryable or attempt == retries:
